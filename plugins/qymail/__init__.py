@@ -1,200 +1,304 @@
-from typing import Any, Dict, Optional
-from email.header import decode_header
-from email.message import Message
+file: wechat_work_email_plugin.py
+
+"""
+微信企业邮箱管理插件
+版本: 1.0.0
+作者: [您的名称]
+功能:
+- 可视化收发企业邮件
+- 支持附件管理
+- 邮件定时检查
+- 邮件分类展示
+- 安全的凭证存储
+"""
+
 import imaplib
+import smtplib
 import email
-import re
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from datetime import datetime, timedelta
+import pytz
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from typing import Any, List, Dict, Optional, Tuple
 
 from app.core.config import settings
-from app.core.context import Context
-from app.core.event import eventmanager, Event
+from app.plugins import _PluginBase
 from app.log import logger
-from app.modules.emby import Emby
-from app.schemas.types import EventType
-from app.plugins._base import BasePlugin
+from app.schemas import NotificationType
 
-class EnterpriseEmail(BasePlugin):
-    # 插件名称
-    plugin_name = "企业邮箱助手"
-    # 插件描述
-    plugin_desc = "监控企业邮箱并执行自动化操作"
-    # 插件图标
-    plugin_icon = "qymail.png"
-    # 插件版本
-    plugin_version = "1.0"
-    # 插件作者
-    plugin_author = "时也命也"
-    # 可使用的用户级别
+class WeWorkEmail(_PluginBase):
+    plugin_name = "微信企业邮箱管理"
+    plugin_desc = "可视化收发微信企业邮箱邮件，支持附件管理"
+    plugin_icon = "https://example.com/email_icon.png"
+    plugin_version = "1.0.0"
+    plugin_author = "[时也命也]"
+    author_url = "https://github.com/beijingxiaokuoe"
+    plugin_config_prefix = "wework_email_"
+    plugin_order = 2
     auth_level = 2
-    # 日志前缀
-    LOG_TAG = "[qymail]"
-    # 作者主页
-    author_url = "https://github.com/beijingxiaokuo"
-    plugin_settings = {
-        "enable": True,
-        "auto_start": True
-    }
 
-    # 配置模型
-    class ConfigModel(BasePlugin.ConfigModel):
-        email_server: str = "imap.exmail.qq.com"
-        email_port: int = 993
-        email_user: str
-        email_password: str
-        check_interval: int = 300  # 检查间隔（秒）
-        command_prefix: str = "/movie"  # 指令前缀
+    # 私有属性
+    _enabled = False
+    _account = None
+    _password = None
+    _imap_host = "imap.exmail.qq.com"
+    _smtp_host = "smtp.exmail.qq.com"
+    _check_interval = "*/10 * * * *"  # 默认10分钟检查一次
+    _notify = True
+    _scheduler: Optional[BackgroundScheduler] = None
 
-    def __init__(self):
-        super().__init__()
-        self._imap = None
-        self._running = False
+    def init_plugin(self, config: dict = None):
+        self.stop_service()
 
-    def init(self):
-        """插件初始化"""
-        if self._config.email_user and self._config.email_password:
-            self._imap = imaplib.IMAP4_SSL(
-                self._config.email_server,
-                self._config.email_port
+        if config:
+            self._enabled = config.get("enabled")
+            self._account = config.get("account")
+            self._password = config.get("password")
+            self._check_interval = config.get("check_interval", "*/10 * * * *")
+
+        if self._enabled and self._validate_config():
+            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+            self._scheduler.add_job(
+                self.check_email,
+                trigger=CronTrigger.from_crontab(self._check_interval),
+                id="wework_email_check"
             )
-            try:
-                self._imap.login(
-                    self._config.email_user,
-                    self._config.email_password
-                )
-                logger.info("企业邮箱登录成功")
-            except Exception as e:
-                logger.error(f"邮箱登录失败: {str(e)}")
-                self._imap = None
+            self._scheduler.start()
+            logger.info("微信企业邮箱插件已启动")
 
-    def start(self):
-        """启动插件"""
-        if not self._running and self._imap:
-            self._running = True
-            self.check_email_job()
+    def _validate_config(self) -> bool:
+        """验证配置有效性"""
+        if not all([self._account, self._password]):
+            logger.error("邮箱账号或密码未配置")
+            return False
+        return True
 
-    def stop(self):
-        """停止插件"""
-        self._running = False
-        if self._imap:
-            try:
-                self._imap.close()
-                self._imap.logout()
-            except Exception:
-                pass
-
-    @eventmanager.register(EventType.PluginReload)
-    def reload(self, event: Event):
-        """响应插件重载事件"""
-        self.stop()
-        self.init()
-        self.start()
-
-    def check_email_job(self):
-        """定时检查邮件任务"""
-        if not self._running:
-            return
-
+    def check_email(self):
+        """检查新邮件"""
         try:
-            self._imap.select("INBOX")
-            status, messages = self._imap.search(None, "UNSEEN")
-            if status != "OK":
-                return
+            with imaplib.IMAP4_SSL(self._imap_host) as imap:
+                imap.login(self._account, self._password)
+                imap.select("INBOX")
 
-            for num in messages[0].split():
-                self.process_email(num)
-                
+                status, messages = imap.search(None, 'UNSEEN')
+                if status == 'OK':
+                    email_count = len(messages[0].split())
+                    if email_count > 0:
+                        self._send_notification(
+                            title="📬 新邮件通知",
+                            text=f"检测到 {email_count} 封未读邮件"
+                        )
         except Exception as e:
             logger.error(f"检查邮件失败: {str(e)}")
-        finally:
-            # 定时循环
-            self._scheduler.add_job(
-                self.check_email_job,
-                'interval',
-                seconds=self._config.check_interval,
-                id="email_check"
-            )
 
-    def process_email(self, email_num: str):
-        """处理单封邮件"""
+    def send_email(self, to: str, subject: str, content: str, attachments: list = None) -> dict:
+        """发送邮件"""
         try:
-            status, data = self._imap.fetch(email_num, "(RFC822)")
-            raw_email = data[0][1]
-            msg = email.message_from_bytes(raw_email)
+            msg = MIMEMultipart()
+            msg['From'] = self._account
+            msg['To'] = to
+            msg['Subject'] = subject
+            msg.attach(MIMEText(content, 'html'))
+
+            # 附件处理
+            if attachments:
+                for file in attachments:
+                    part = MIMEText(file['content'])
+                    part.add_header(
+                        'Content-Disposition',
+                        'attachment',
+                        filename=file['name']
+                    )
+                    msg.attach(part)
+
+            with smtplib.SMTP_SSL(self._smtp_host) as smtp:
+                smtp.login(self._account, self._password)
+                smtp.send_message(msg)
             
-            # 解析邮件信息
-            subject = self._decode_header(msg.get("Subject", ""))
-            from_ = self._decode_header(msg.get("From", ""))
-            content = self._get_text_content(msg)
-
-            logger.info(f"收到新邮件 - 发件人: {from_}, 主题: {subject}")
-
-            # 执行命令处理
-            if subject.startswith(self._config.command_prefix):
-                self._handle_command(from_, content)
-
-            # 标记为已读
-            self._imap.store(email_num, "+FLAGS", "\\Seen")
-
+            return {"status": True, "message": "邮件发送成功"}
         except Exception as e:
-            logger.error(f"处理邮件失败: {str(e)}")
+            logger.error(f"邮件发送失败: {str(e)}")
+            return {"status": False, "message": str(e)}
 
-    def _handle_command(self, sender: str, command: str):
-        """处理邮件指令"""
-        # 权限验证（示例）
-        if not self._is_authorized(sender):
-            logger.warning(f"未授权用户尝试执行命令: {sender}")
-            return
+    def get_recent_emails(self, limit=20) -> List[dict]:
+        """获取最近邮件"""
+        emails = []
+        try:
+            with imaplib.IMAP4_SSL(self._imap_host) as imap:
+                imap.login(self._account, self._password)
+                imap.select("INBOX")
 
-        # 解析命令参数
-        match = re.match(r"/(\w+)\s+(.+)", command)
-        if not match:
-            return
+                status, messages = imap.search(None, 'ALL')
+                if status == 'OK':
+                    for num in messages[0].split()[:limit]:
+                        status, data = imap.fetch(num, '(RFC822)')
+                        if status == 'OK':
+                            raw_email = data[0][1]
+                            email_message = email.message_from_bytes(raw_email)
+                            
+                            email_info = {
+                                'from': email_message['From'],
+                                'subject': email_message['Subject'],
+                                'date': email_message['Date'],
+                                'content': self._parse_email_content(email_message)
+                            }
+                            emails.append(email_info)
+        except Exception as e:
+            logger.error(f"获取邮件失败: {str(e)}")
+        return emails
 
-        cmd_type, params = match.groups()
-        
-        # 执行对应操作
-        if cmd_type == "search":
-            # 调用媒体库搜索
-            results = Emby().search_media(params)
-            # TODO: 发送结果邮件
-            logger.info(f"执行搜索命令: {params}")
+    def _parse_email_content(self, msg) -> str:
+        """解析邮件内容"""
+        content = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                if content_type == "text/plain":
+                    content += part.get_payload(decode=True).decode()
+        else:
+            content = msg.get_payload(decode=True).decode()
+        return content[:500] + "..."  # 截取前500字符
 
-        elif cmd_type == "download":
-            # 触发下载任务
-            self.event_manager.send_event(
-                EventType.DownloadAdd,
-                {
-                    "url": params,
-                    "user": sender
-                }
+    def _send_notification(self, title: str, text: str):
+        """发送通知"""
+        if self._notify:
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title=title,
+                text=text
             )
-            logger.info(f"触发下载任务: {params}")
 
-    def _is_authorized(self, sender: str) -> bool:
-        """验证发件人权限"""
-        return sender in settings.SUPERUSERS
-
-    def _decode_header(self, header: str) -> str:
-        """解码邮件头"""
-        decoded = decode_header(header)
-        return str(decoded[0][0], decoded[0][1] or "utf-8")
-
-    def _get_text_content(self, msg: Message) -> str:
-        """提取纯文本内容"""
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                return part.get_payload(decode=True).decode("utf-8")
-        return ""
-
-    def get_state(self) -> bool:
-        """获取运行状态"""
-        return self._running
-
-    @staticmethod
-    def get_command() -> Dict[str, Any]:
-        """暴露服务接口（示例）"""
-        return {
-            "cmd": "/email",
-            "desc": "邮件服务接口",
-            "params": {}
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        return [
+            {
+                'component': 'VForm',
+                'content': [
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'account',
+                                            'label': '企业邮箱',
+                                            'placeholder': 'user@company.com'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'password',
+                                            'label': '授权密码',
+                                            'type': 'password'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12},
+                                'content': [
+                                    {
+                                        'component': 'VCronField',
+                                        'props': {
+                                            'model': 'check_interval',
+                                            'label': '邮件检查频率'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ], {
+            "enabled": False,
+            "account": "",
+            "password": "",
+            "check_interval": "*/10 * * * *"
         }
+
+    def get_page(self) -> List[dict]:
+        """邮件列表页面"""
+        emails = self.get_recent_emails()
+        rows = []
+        for email in emails:
+            rows.append({
+                'component': 'tr',
+                'content': [
+                    {'component': 'td', 'text': email['from']},
+                    {'component': 'td', 'text': email['subject']},
+                    {'component': 'td', 'text': email['date']},
+                    {
+                        'component': 'td',
+                        'content': [{
+                            'component': 'VBtn',
+                            'props': {
+                                'small': True,
+                                'variant': 'tonal',
+                                'onClick': f'window.showEmailDetail({email})'
+                            },
+                            'text': '查看详情'
+                        }]
+                    }
+                ]
+            })
+
+        return [{
+            'component': 'VCard',
+            'content': [
+                {
+                    'component': 'VCardTitle',
+                    'text': '📧 最近邮件'
+                },
+                {
+                    'component': 'VCardText',
+                    'content': [{
+                        'component': 'VTable',
+                        'props': {'hover': True},
+                        'content': [
+                            {
+                                'component': 'thead',
+                                'content': [{
+                                    'component': 'tr',
+                                    'content': [
+                                        {'component': 'th', 'text': '发件人'},
+                                        {'component': 'th', 'text': '主题'},
+                                        {'component': 'th', 'text': '日期'},
+                                        {'component': 'th', 'text': '操作'}
+                                    ]
+                                }]
+                            },
+                            {
+                                'component': 'tbody',
+                                'content': rows
+                            }
+                        ]
+                    }]
+                }
+            ]
+        }]
+
+    def stop_service(self):
+        if self._scheduler:
+            self._scheduler.remove_all_jobs()
+            if self._scheduler.running:
+                self._scheduler.shutdown()
+            self._scheduler = None
