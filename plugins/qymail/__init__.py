@@ -21,9 +21,15 @@ class EnterpriseEmail(BasePlugin):
     # 插件图标
     plugin_icon = "qymail.png"
     # 插件版本
-    plugin_version = "1.1"
+    plugin_version = "1.0"
     # 插件作者
     plugin_author = "时也命也"
+    # 可使用的用户级别
+    auth_level = 2
+    # 日志前缀
+    LOG_TAG = "[qymail]"
+    # 作者主页
+    author_url = "https://github.com/beijingxiaokuo"
     plugin_settings = {
         "enable": True,
         "auto_start": True
