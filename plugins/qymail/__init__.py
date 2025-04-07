@@ -1,7 +1,3 @@
-"""
-微信企业邮箱插件（MoviePilot V2 规范版）
-功能：监控企业邮箱并解析邮件内容执行自动化操作
-"""
 from typing import Any, Dict, Optional
 from email.header import decode_header
 from email.message import Message
