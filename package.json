@@ -1,0 +1,15 @@
+{
+    "SiteStatistic": {
+        "name": "微信企业邮箱插件",
+        "description": "用于收发邮件，仅用于自用，无意分享。",
+        "labels": "邮箱,仪表板",
+        "version": "1.0",
+        "icon": "qymail.png",
+        "author": "时也命也",
+        "level": 2,
+        "v2": true,
+        "history": {
+            "v1.0": "微信企业邮箱插件-毛坯房"
+        }
+    }
+}
